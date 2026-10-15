@@ -39,6 +39,27 @@ class Answer:
     text: str = ""
     tool_calls: list = field(default_factory=list)
 
+    def to_message(self) -> dict:
+        """Ответ обратно в формат OpenAI-сообщения — чтобы положить в историю.
+
+        Обратная операция к разбору в complete(): arguments уезжают строкой,
+        как того требует формат API.
+        """
+        message: dict = {"role": "assistant", "content": self.text or None}
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                    },
+                }
+                for call in self.tool_calls
+            ]
+        return message
+
 
 def complete(messages: list, tools: list | None = None) -> Answer:
     """Один запрос к модели.
@@ -55,7 +76,7 @@ def complete(messages: list, tools: list | None = None) -> Answer:
 
     base_url = os.environ.get("BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     body: dict = {
-        "model": os.environ.get("MODEL", "deepseek-chat"),
+        "model": os.environ.get("MODEL", "deepseek-v4-flash"),
         "messages": messages,
     }
     if tools:
