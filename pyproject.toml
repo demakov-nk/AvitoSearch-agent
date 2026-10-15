@@ -1,0 +1,23 @@
+[project]
+name = "avitosearch-agent"
+version = "0.1.0"
+description = "AI-agent for smart search on www.avito.ru"
+authors = [
+    {name = "Kuzon1952"},
+    {name = "demakov-nk"},
+    {name = "llekk"},
+    {name = "morechi"},
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.0.0,<3.0.0",
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+package-mode = false
+
