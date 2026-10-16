@@ -16,15 +16,19 @@ from mcp.client.stdio import stdio_client
 
 from tools.registry import Tool
 
-# Инструмент avito_setup_session открывает окно браузера — модели он не нужен,
-# сессию человек создаёт сам командой `npx avito-shopping-mcp setup`.
-EXCLUDE_TOOLS = {"avito_setup_session"}
-
 SERVER_COMMAND = "npx"
 SERVER_ARGS = ["-y", "avito-shopping-mcp", "serve"]
 
 STARTUP_TIMEOUT = 120.0   # первый запуск npx может скачивать пакет
 CALL_TIMEOUT = 180.0      # сервер ходит на Авито с паузами — вызовы небыстрые
+
+# Пересоздание сессии открывает окно браузера и ждёт, пока человек пройдёт
+# капчу, — разрешаем вызов не чаще раза в 10 минут и даём ему больше времени.
+SETUP_MIN_INTERVAL_S = 600.0
+SETUP_CALL_TIMEOUT = 900.0
+
+# Служебный вывод сервера в консоль не печатаем — он пишется в никуда.
+_DEVNULL = open(os.devnull, "w")
 
 
 class McpClient:
@@ -37,6 +41,7 @@ class McpClient:
 
     def __init__(self, state_dir: str | None = None, executable_path: str | None = None):
         env = dict(os.environ)
+        env.setdefault("npm_config_loglevel", "error")  # глушим «npm notice» npx
         state_dir = state_dir or os.environ.get("AVITO_MCP_STATE_DIR")
         executable_path = executable_path or os.environ.get("AVITO_MCP_EXECUTABLE_PATH")
         if state_dir:
@@ -51,6 +56,7 @@ class McpClient:
         self._error: Exception | None = None
         self._tools: list[Tool] = []
         self._session: ClientSession | None = None
+        self._last_setup_at = 0.0  # монотонное время последнего пересоздания сессии
         self._thread = threading.Thread(target=self._run, daemon=True, name="mcp-client")
 
     # ---- запуск ----
@@ -71,15 +77,12 @@ class McpClient:
 
     async def _main(self) -> None:
         try:
-            async with stdio_client(self._params) as (read, write):
+            async with stdio_client(self._params, errlog=_DEVNULL) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     self._session = session
                     listed = await session.list_tools()
-                    self._tools = [
-                        self._wrap(tool) for tool in listed.tools
-                        if tool.name not in EXCLUDE_TOOLS
-                    ]
+                    self._tools = [self._wrap(tool) for tool in listed.tools]
                     self._ready.set()
                     await asyncio.Event().wait()  # держим соединение до конца прогона
         except Exception as error:
@@ -107,21 +110,37 @@ class McpClient:
     # ---- вызовы ----
 
     def call(self, name: str, arguments: dict) -> str:
-        """Синхронный вызов инструмента сервера. Результат — строка для role=tool."""
+        """Синхронный вызов инструмента сервера. Результат — строка для role=tool.
+
+        Сами не ретраим: каждый повтор — это лишние запросы к Авито, из-за
+        которых IP ловит 429. Пересоздание сессии ограничено по частоте —
+        модель не может гонять setup по кругу.
+        """
         if self._error or self._session is None:
             return f"ОШИБКА MCP: сервер недоступен ({self._error})"
-        result = self._call_sync(name, arguments)
-        # Авито отвечает 439, пока браузер не решил JS-доказательство работы.
-        # Даём ему время и повторяем один раз — по наблюдениям, второй заход
-        # проходит, когда задача уже решена.
-        if "SESSION_EXPIRED" in result:
-            time.sleep(25)
-            result = self._call_sync(name, arguments)
-        return result
+        if name == "avito_setup_session":
+            throttle = self._check_setup_throttle()
+            if throttle:
+                return throttle
+        return self._call_sync(name, arguments)
+
+    def _check_setup_throttle(self) -> str:
+        """Разрешает пересоздание сессии не чаще раза в SETUP_MIN_INTERVAL_S."""
+        elapsed = time.monotonic() - self._last_setup_at
+        if elapsed < SETUP_MIN_INTERVAL_S:
+            wait_min = (SETUP_MIN_INTERVAL_S - elapsed) / 60
+            return (
+                f"ОШИБКА: пересоздание сессии уже запускалось {elapsed / 60:.0f} мин назад. "
+                f"Повторный запуск разрешён не раньше чем через {wait_min:.0f} мин. "
+                "Не вызывай этот инструмент повторно."
+            )
+        self._last_setup_at = time.monotonic()
+        return ""
 
     def _call_sync(self, name: str, arguments: dict) -> str:
+        timeout = SETUP_CALL_TIMEOUT if name == "avito_setup_session" else CALL_TIMEOUT
         future = asyncio.run_coroutine_threadsafe(self._call(name, arguments), self._loop)
-        return future.result(timeout=CALL_TIMEOUT)
+        return future.result(timeout=timeout)
 
     async def _call(self, name: str, arguments: dict) -> str:
         try:

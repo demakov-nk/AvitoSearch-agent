@@ -10,6 +10,7 @@ import time
 
 from llm import complete
 from memory import Memory
+from skills import load_agents_md, load_skills
 from tools.registry import Registry
 
 MAX_STEPS = 10  # лимит шагов в коде — гарантия остановки (требование ЛР2)
@@ -30,10 +31,28 @@ class Agent:
         self.registry = registry
         self.max_steps = max_steps
         self.log = log
+        self.memory: Memory | None = None
+        self.system_prompt = self._build_system_prompt()
+
+    @staticmethod
+    def _build_system_prompt() -> str:
+        """База + память проекта (AGENTS.md) + все скиллы — один раз на сессию."""
+        parts = [SYSTEM_PROMPT]
+        agents_md = load_agents_md()
+        if agents_md:
+            parts.append("Память проекта (AGENTS.md):\n" + agents_md)
+        skills_text = load_skills()
+        if skills_text:
+            parts.append("Навыки (следуй им, когда задача им соответствует):\n" + skills_text)
+        return "\n\n".join(parts)
 
     def run(self, user_query: str) -> str:
-        # вся память на прогон — список сообщений (memory.py)
-        memory = Memory(SYSTEM_PROMPT, user_query)
+        # память живёт всю сессию: первый вопрос создаёт её, следующие дописываются
+        if self.memory is None:
+            self.memory = Memory(self.system_prompt, user_query)
+        else:
+            self.memory.add_message({"role": "user", "content": user_query})
+        memory = self.memory
         self._log(0, f"задача: {user_query!r} | инструментов: {len(self.registry.schemas())}")
 
         for step in range(1, self.max_steps + 1):
